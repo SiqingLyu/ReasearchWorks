@@ -1,22 +1,30 @@
+from __future__ import division
+
 import math
+
 import torch
-
-from collections import OrderedDict
+from torch.jit.annotations import List, Tuple
 from torch import Tensor
-from typing import List, Tuple
-
-from torchvision.ops.misc import FrozenBatchNorm2d
+import torchvision
 
 
+# TODO: https://github.com/pytorch/pytorch/issues/26727
+def zeros_like(tensor, dtype):
+    # type: (Tensor, int) -> Tensor
+    return torch.zeros_like(tensor, dtype=dtype, layout=tensor.layout,
+                            device=tensor.device, pin_memory=tensor.is_pinned())
+
+
+@torch.jit.script
 class BalancedPositiveNegativeSampler(object):
     """
     This class samples batches, ensuring that they contain a fixed proportion of positives
     """
 
     def __init__(self, batch_size_per_image, positive_fraction):
-        # type: (int, float) -> None
+        # type: (int, float)
         """
-        Args:
+        Arguments:
             batch_size_per_image (int): number of elements to be selected per image
             positive_fraction (float): percentace of positive elements per batch
         """
@@ -24,9 +32,9 @@ class BalancedPositiveNegativeSampler(object):
         self.positive_fraction = positive_fraction
 
     def __call__(self, matched_idxs):
-        # type: (List[Tensor]) -> Tuple[List[Tensor], List[Tensor]]
+        # type: (List[Tensor])
         """
-        Args:
+        Arguments:
             matched idxs: list of tensors containing -1, 0 or positive values.
                 Each tensor corresponds to a specific image.
                 -1 values are ignored, 0 are considered as negatives and > 0 as
@@ -43,8 +51,8 @@ class BalancedPositiveNegativeSampler(object):
         pos_idx = []
         neg_idx = []
         for matched_idxs_per_image in matched_idxs:
-            positive = torch.where(matched_idxs_per_image >= 1)[0]
-            negative = torch.where(matched_idxs_per_image == 0)[0]
+            positive = torch.nonzero(matched_idxs_per_image >= 1).squeeze(1)
+            negative = torch.nonzero(matched_idxs_per_image == 0).squeeze(1)
 
             num_pos = int(self.batch_size_per_image * self.positive_fraction)
             # protect against not enough positive examples
@@ -61,15 +69,15 @@ class BalancedPositiveNegativeSampler(object):
             neg_idx_per_image = negative[perm2]
 
             # create binary mask from indices
-            pos_idx_per_image_mask = torch.zeros_like(
+            pos_idx_per_image_mask = zeros_like(
                 matched_idxs_per_image, dtype=torch.uint8
             )
-            neg_idx_per_image_mask = torch.zeros_like(
+            neg_idx_per_image_mask = zeros_like(
                 matched_idxs_per_image, dtype=torch.uint8
             )
 
-            pos_idx_per_image_mask[pos_idx_per_image] = 1
-            neg_idx_per_image_mask[neg_idx_per_image] = 1
+            pos_idx_per_image_mask[pos_idx_per_image] = torch.tensor(1, dtype=torch.uint8)
+            neg_idx_per_image_mask[neg_idx_per_image] = torch.tensor(1, dtype=torch.uint8)
 
             pos_idx.append(pos_idx_per_image_mask)
             neg_idx.append(neg_idx_per_image_mask)
@@ -84,10 +92,9 @@ def encode_boxes(reference_boxes, proposals, weights):
     Encode a set of proposals with respect to some
     reference boxes
 
-    Args:
+    Arguments:
         reference_boxes (Tensor): reference boxes
         proposals (Tensor): boxes to be encoded
-        weights (Tensor[4]): the weights for ``(x, y, w, h)``
     """
 
     # perform some unpacking to make it JIT-fusion friendly
@@ -126,6 +133,7 @@ def encode_boxes(reference_boxes, proposals, weights):
     return targets
 
 
+@torch.jit.script
 class BoxCoder(object):
     """
     This class encodes and decodes a set of bounding boxes into
@@ -133,9 +141,9 @@ class BoxCoder(object):
     """
 
     def __init__(self, weights, bbox_xform_clip=math.log(1000. / 16)):
-        # type: (Tuple[float, float, float, float], float) -> None
+        # type: (Tuple[float, float, float, float], float)
         """
-        Args:
+        Arguments:
             weights (4-element tuple)
             bbox_xform_clip (float)
         """
@@ -143,7 +151,7 @@ class BoxCoder(object):
         self.bbox_xform_clip = bbox_xform_clip
 
     def encode(self, reference_boxes, proposals):
-        # type: (List[Tensor], List[Tensor]) -> List[Tensor]
+        # type: (List[Tensor], List[Tensor])
         boxes_per_image = [len(b) for b in reference_boxes]
         reference_boxes = torch.cat(reference_boxes, dim=0)
         proposals = torch.cat(proposals, dim=0)
@@ -155,7 +163,7 @@ class BoxCoder(object):
         Encode a set of proposals with respect to some
         reference boxes
 
-        Args:
+        Arguments:
             reference_boxes (Tensor): reference boxes
             proposals (Tensor): boxes to be encoded
         """
@@ -167,7 +175,7 @@ class BoxCoder(object):
         return targets
 
     def decode(self, rel_codes, boxes):
-        # type: (Tensor, List[Tensor]) -> Tensor
+        # type: (Tensor, List[Tensor])
         assert isinstance(boxes, (list, tuple))
         assert isinstance(rel_codes, torch.Tensor)
         boxes_per_image = [b.size(0) for b in boxes]
@@ -175,21 +183,16 @@ class BoxCoder(object):
         box_sum = 0
         for val in boxes_per_image:
             box_sum += val
-        if box_sum > 0:
-            rel_codes = rel_codes.reshape(box_sum, -1)
         pred_boxes = self.decode_single(
-            rel_codes, concat_boxes
+            rel_codes.reshape(box_sum, -1), concat_boxes
         )
-        if box_sum > 0:
-            pred_boxes = pred_boxes.reshape(box_sum, -1, 4)
-        return pred_boxes
-
+        return pred_boxes.reshape(box_sum, -1, 4)
     def decode_single(self, rel_codes, boxes):
         """
         From a set of original boxes and encoded relative box offsets,
         get the decoded boxes.
 
-        Args:
+        Arguments:
             rel_codes (Tensor): encoded boxes
             boxes (Tensor): reference boxes.
         """
@@ -216,14 +219,15 @@ class BoxCoder(object):
         pred_w = torch.exp(dw) * widths[:, None]
         pred_h = torch.exp(dh) * heights[:, None]
 
-        pred_boxes1 = pred_ctr_x - torch.tensor(0.5, dtype=pred_ctr_x.dtype, device=pred_w.device) * pred_w
-        pred_boxes2 = pred_ctr_y - torch.tensor(0.5, dtype=pred_ctr_y.dtype, device=pred_h.device) * pred_h
-        pred_boxes3 = pred_ctr_x + torch.tensor(0.5, dtype=pred_ctr_x.dtype, device=pred_w.device) * pred_w
-        pred_boxes4 = pred_ctr_y + torch.tensor(0.5, dtype=pred_ctr_y.dtype, device=pred_h.device) * pred_h
+        pred_boxes1 = pred_ctr_x - torch.tensor(0.5, dtype=pred_ctr_x.dtype) * pred_w
+        pred_boxes2 = pred_ctr_y - torch.tensor(0.5, dtype=pred_ctr_y.dtype) * pred_h
+        pred_boxes3 = pred_ctr_x + torch.tensor(0.5, dtype=pred_ctr_x.dtype) * pred_w
+        pred_boxes4 = pred_ctr_y + torch.tensor(0.5, dtype=pred_ctr_y.dtype) * pred_h
         pred_boxes = torch.stack((pred_boxes1, pred_boxes2, pred_boxes3, pred_boxes4), dim=2).flatten(1)
         return pred_boxes
 
 
+@torch.jit.script
 class Matcher(object):
     """
     This class assigns to each predicted "element" (e.g., a box) a ground-truth
@@ -248,7 +252,7 @@ class Matcher(object):
     }
 
     def __init__(self, high_threshold, low_threshold, allow_low_quality_matches=False):
-        # type: (float, float, bool) -> None
+        # type: (float, float, bool)
         """
         Args:
             high_threshold (float): quality values greater than or equal to
@@ -304,8 +308,8 @@ class Matcher(object):
         between_thresholds = (matched_vals >= self.low_threshold) & (
             matched_vals < self.high_threshold
         )
-        matches[below_low_threshold] = self.BELOW_LOW_THRESHOLD
-        matches[between_thresholds] = self.BETWEEN_THRESHOLDS
+        matches[below_low_threshold] = torch.tensor(self.BELOW_LOW_THRESHOLD)
+        matches[between_thresholds] = torch.tensor(self.BETWEEN_THRESHOLDS)
 
         if self.allow_low_quality_matches:
             assert all_matches is not None
@@ -324,7 +328,7 @@ class Matcher(object):
         # For each gt, find the prediction with which it has highest quality
         highest_quality_foreach_gt, _ = match_quality_matrix.max(dim=1)
         # Find highest quality match available, even if it is low, including ties
-        gt_pred_pairs_of_highest_quality = torch.where(
+        gt_pred_pairs_of_highest_quality = torch.nonzero(
             match_quality_matrix == highest_quality_foreach_gt[:, None]
         )
         # Example gt_pred_pairs_of_highest_quality:
@@ -341,70 +345,5 @@ class Matcher(object):
         # Each row is a (gt index, prediction index)
         # Note how gt items 1, 2, 3, and 5 each have two ties
 
-        pred_inds_to_update = gt_pred_pairs_of_highest_quality[1]
+        pred_inds_to_update = gt_pred_pairs_of_highest_quality[:, 1]
         matches[pred_inds_to_update] = all_matches[pred_inds_to_update]
-
-
-class SSDMatcher(Matcher):
-
-    def __init__(self, threshold):
-        super().__init__(threshold, threshold, allow_low_quality_matches=False)
-
-    def __call__(self, match_quality_matrix):
-        matches = super().__call__(match_quality_matrix)
-
-        # For each gt, find the prediction with which it has the highest quality
-        _, highest_quality_pred_foreach_gt = match_quality_matrix.max(dim=1)
-        matches[highest_quality_pred_foreach_gt] = torch.arange(highest_quality_pred_foreach_gt.size(0),
-                                                                dtype=torch.int64,
-                                                                device=highest_quality_pred_foreach_gt.device)
-
-        return matches
-
-
-def overwrite_eps(model, eps):
-    """
-    This method overwrites the default eps values of all the
-    FrozenBatchNorm2d layers of the model with the provided value.
-    This is necessary to address the BC-breaking change introduced
-    by the bug-fix at pytorch/vision#2933. The overwrite is applied
-    only when the pretrained weights are loaded to maintain compatibility
-    with previous versions.
-
-    Args:
-        model (nn.Module): The model on which we perform the overwrite.
-        eps (float): The new value of eps.
-    """
-    for module in model.modules():
-        if isinstance(module, FrozenBatchNorm2d):
-            module.eps = eps
-
-
-def retrieve_out_channels(model, size):
-    """
-    This method retrieves the number of output channels of a specific model.
-
-    Args:
-        model (nn.Module): The model for which we estimate the out_channels.
-            It should return a single Tensor or an OrderedDict[Tensor].
-        size (Tuple[int, int]): The size (wxh) of the input.
-
-    Returns:
-        out_channels (List[int]): A list of the output channels of the model.
-    """
-    in_training = model.training
-    model.eval()
-
-    with torch.no_grad():
-        # Use dummy data to retrieve the feature map sizes to avoid hard-coding their values
-        device = next(model.parameters()).device
-        tmp_img = torch.zeros((1, 3, size[1], size[0]), device=device)
-        features = model(tmp_img)
-        if isinstance(features, torch.Tensor):
-            features = OrderedDict([('0', features)])
-        out_channels = [x.size(1) for x in features.values()]
-
-    if in_training:
-        model.train()
-
-    return out_channels

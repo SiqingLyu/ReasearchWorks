@@ -1,5 +1,8 @@
 #!/usr/bin/python
 # -*- coding: UTF-8 -*-
+import sys
+sys.path.append('/media/dell/shihaoze/lsq/LSQNetModel')
+
 from models.submodule import *
 import models.detection as MaskrcnnModels
 from models.detection.faster_rcnn import FastRCNNPredictor
@@ -8,12 +11,12 @@ from torchvision.ops import MultiScaleRoIAlign
 import torch.nn as nn
 import torch.nn.functional as F
 from types import MethodType
-from .pytorch_tools import *
+from pytorch_tools import *
 import copy
 from torchvision.ops import boxes as box_ops
 from torch.nn.functional import l1_loss, mse_loss
 import tifffile as tif
-from torchvision.models.detection.mask_rcnn import MaskRCNN
+
 
 BACKGROUND = 0
 
@@ -54,7 +57,7 @@ def nos_loss(self, gt_nos, nos_predict, fname):
         gt_nos[has_nos],
         reduction="sum"
     )
-    storey_loss = storey_loss / has_nos.sum()
+    storey_loss = storey_loss / (has_nos.sum()+0.00000000001)
     return storey_loss
 
 
@@ -86,18 +89,19 @@ class MaskRcnn_res50(nn.Module):
             # 'box_fg_iou_thresh':0.7,
             # 'box_bg_iou_thresh':0.7
         }
-        self.main_model = MaskrcnnModels.maskrcnn_resnet50_fpn(pretrained=True, **faster_rcnn_kargs)
+        self.main_model = MaskrcnnModels.maskrcnn_resnet50_fpn(pretrained=False, pretrained_backbone=False, mask_branch=False, **faster_rcnn_kargs)
         in_features = self.main_model.roi_heads.box_predictor.cls_score.in_features
         # replace the pre-trained head with a new one
         self.main_model.roi_heads.box_predictor = FastRCNNPredictor(in_features, self.num_classes)
 
-        # now get the number of input features for the mask classifier
-        in_features_mask = self.main_model.roi_heads.mask_predictor.conv5_mask.in_channels
-        hidden_layer = self.main_model.roi_heads.mask_predictor.conv5_mask.out_channels
-        # and replace the mask predictor with a new one
-        self.main_model.roi_heads.mask_predictor = MaskRCNNPredictor(in_features_mask,
-                                                                     hidden_layer,
-                                                                     self.num_classes)
+        # # now get the number of input features for the mask classifier
+        # in_features_mask = self.main_model.roi_heads.mask_predictor.conv5_mask.in_channels
+        # hidden_layer = self.main_model.roi_heads.mask_predictor.conv5_mask.out_channels
+        # # and replace the mask predictor with a new one
+        # self.main_model.roi_heads.mask_predictor = MaskRCNNPredictor(in_features_mask,
+        #                                                              hidden_layer,
+        #                                                              self.num_classes)
+
         # 层数预测分支
         self.main_model.roi_heads.nos_roi_pool = MultiScaleRoIAlign(
             featmap_names=['0', '1', '2', '3'],
@@ -157,7 +161,7 @@ class MaskRcnn_res50(nn.Module):
             output, gts_post = self.postprocess_output(output, gts)
             for inx, (img, target, predict) in enumerate(zip(images, gts_post, output)):
                 predict = detach_all(predict)
-                t_boxes = list_to_cuda(target['boxes'])
+                t_boxes = target['boxes']
                 target['labels'] = target['labels'].float()
                 p_boxes = predict['boxes']
                 p_score = predict['scores']
@@ -200,7 +204,7 @@ class MaskRcnn_res50(nn.Module):
             output, gts_post = self.postprocess_output(output, gts)
             for inx, (img, target, predict) in enumerate(zip(images, gts_post, output)):
                 predict = detach_all(predict)
-                t_boxes = list_to_cuda(target['boxes'])
+                t_boxes = target['boxes']
                 target['labels'] = target['labels'].float()
                 p_boxes = predict['boxes']
                 p_score = predict['scores']
@@ -209,8 +213,7 @@ class MaskRcnn_res50(nn.Module):
                     FN_t_inx = list(range(len(t_boxes)))
                 else:
                     match_quality_matrix = box_ops.box_iou(t_boxes, p_boxes)
-                    TP_pre_inx, TP_gt_inx, FP_p_inx, FN_t_inx, iou_pre = get_match_inx(match_quality_matrix, 1)
-
+                    TP_pre_inx, TP_gt_inx, FP_p_inx, FN_t_inx, iou_pre = get_match_inx(match_quality_matrix, 0.7)
                 TP_p, TP_t, FP_p, FN_t = self.nos_collection_gt.collect(target, predict, TP_pre_inx, TP_gt_inx, FP_p_inx,
                                                                         FN_t_inx)
                 # _ = self.area_collection.collect(target, None, TP_pre_inx, TP_gt_inx, FP_p_inx, FN_t_inx)
@@ -236,7 +239,6 @@ class MaskRcnn_res50(nn.Module):
                     self.sample_step_end(locals())
 
         return {}
-
 
     def get_val_result(self, output):
         log_dict = {}
@@ -267,7 +269,7 @@ class MaskRcnn_res50(nn.Module):
                 val_loss = MAE_all
             else:
                 log_dict_all = make_log('', locals(), F1_all, P_all, R_all)
-                # val_loss = F1
+                val_loss = 0
             if self.seg_metirx_gt[0]:
                 I, U, TPTN, POS, GT = torch.tensor(self.seg_metirx_gt).sum(1).float()
                 seg_IoU_all = I / (U+0.00001)
@@ -277,7 +279,7 @@ class MaskRcnn_res50(nn.Module):
                 seg_log_all = make_log('', locals(), seg_acc_all, seg_IoU_all, seg_P_all, seg_R_all)
                 log_dict_all.update(seg_log_all)
 
-        log_dict.update(log_dict_all)
+            log_dict.update(log_dict_all)
         return {
             'val_loss': val_loss,
             'log': log_dict
@@ -337,6 +339,7 @@ class MaskRcnn_res50(nn.Module):
     def sample_step_end(self, variables):
         return
 
+
 def get_match_inx(match_quality_matrix, iou_threshold = 0.5):
     # match_quality_matrix.shape:(len(t_boxes), len(p_boxes))
     num_t, num_p = match_quality_matrix.shape
@@ -349,6 +352,7 @@ def get_match_inx(match_quality_matrix, iou_threshold = 0.5):
         max_inx = match_quality_matrix.argmax()
         row = max_inx // col_numel
         col = max_inx % col_numel
+
         max_value = match_quality_matrix[row, col].item()
         # 若当前最大的IoU小于给定阈值，则结束匹配
         if max_value < iou_threshold:
@@ -404,6 +408,7 @@ class result_collection(object):
 def NoS_metric(TP_p, TP_t, FP_p=None, FN_t=None):
     '''return MAE, RMSE, res_rel, IoU_NoS'''
     has_nos = TP_t != 0
+    # print('===============>', len(has_nos),'\n', TP_t,TP_p)
     valid_gt, valid_pre = TP_t[has_nos], TP_p[has_nos]
     if len(valid_gt) == 0:
         MAE, RMSE, res_rel, IoU_NoS = torch.tensor([9999] * 4)
