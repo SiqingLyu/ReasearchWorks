@@ -196,7 +196,6 @@ if __name__ == '__main__':
     root_path = r'G:\ProductData\CBRA'  # CBRA 数据存储位置，内包含2016-2021所有文件夹和影像
     save_path = r'G:\ProductData\CBRA\CBRA_clip'  # 裁剪得到的影像的保存位置
     save_name = "Beijing"  # 裁剪得到的影像系列的名称, 最终结果默认存在save_name0.tif中
-    in_raster = r'G:\ProductData\CBRA\CBRA_2018\CBRA_2018_E116.0_N41.3.tif'  # 裁剪得到的影像系列的名称
     in_temp = r'D:\Desktop\ZepingData\ROI\Beijing.shp'  # 对应要裁剪的范围的shp文件
 
     desc = arcpy.Describe(in_temp)
