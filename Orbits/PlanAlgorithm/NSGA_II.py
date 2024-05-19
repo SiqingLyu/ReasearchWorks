@@ -11,29 +11,77 @@ from pymoo.operators.sampling.rnd import BinaryRandomSampling
 from pymoo.optimize import minimize
 from pymoo.visualization.scatter import Scatter
 from pymoo.algorithms.soo.nonconvex.ga import GA
+from typing import List, Tuple, Dict
 
 
-class OrbitProblem(Problem):
-    def __init__(self, cost_matrix: list, ):
-        self.cost_matrix = cost_matrix
-        super().__init__(n_var=2,   # 变量数
-                         n_obj=2,   # 目标数
-                         n_constr=2,    # 约束数
-                         xl=np.array([-2, -2]),     # 变量下界
-                         xu=np.array([2, 2]),   # 变量上界
-                         )
+class OrbitProblem(ElementwiseProblem):
+    def __init__(self, **kwargs):
+        super().__init__(n_var=4, n_obj=3, n_ieq_constr=9, n_eq_constr=0,
+                         xl=np.array([0, 0, 0, 0]), xu=np.array([1, 24, 24, 90]), **kwargs)
+
+    def object_max_profit(self, x):
+
+        y = """此处输入的x需要做二值化，也可结合constr_one_observe设置x为int"""
+        return -y
+
+    def object_min_load(self, x):
+        y = """"""
+        return y
+
+    def object_max_neighbors(self, x):
+        y = """"""
+        return -y
+
+    def constr_one_observe(self, x):
+        y = """"""
+        return y
+
+    def constr_change_time(self, x):
+        y = """"""
+        return y
+
+    def constr_inside_window(self, x):
+        y1, y2 = """"""
+        return y1, y2
+
+    def constr_compos_time(self, x):
+        y = """"""
+        return y
+
+    def constr_compos_angle(self, x):
+        y = """"""
+        return y
+
+    def constr_round_max_time(self, x):
+        y = """"""
+        return y
+
+    def constr_max_space(self, x):
+        y = """"""
+        return y
+
+    def constr_max_energy(self, x):
+        y = """"""
+        return y
 
     def _evaluate(self, x, out, *args, **kwargs):
 
         # 定义目标函数
-        f1 = x[:, 0]**2 + x[:, 1]**2    # x1放在x的第0列，x2放在x的第一列
-        f2 = (x[:, 0] - 1)**2 + x[:, 1]**2
+        f1 = self.object_max_profit(x)
+        f2 = self.object_min_load(x)
+        f3 = self.object_max_neighbors(x)
         # 定义约束条件
-        g1 = 2*(x[:, 0] - 0.1) * (x[:, 0] - 0.9) / 0.18
-        g2 = -20*(x[:, 0] - 0.4) * (x[:, 0] - 0.6) / 4.8
-        # todo
-        out["F"] = np.column_stack([f1, f2])
-        out["G"] = np.column_stack([g1, g2])
+        g1 = self.constr_one_observe(x)
+        g2 = self.constr_change_time(x)
+        g3_1, g3_2 = self.constr_inside_window(x)
+        g4 = self.constr_compos_time(x)
+        g5 = self.constr_compos_angle(x)
+        g6 = self.constr_round_max_time(x)
+        g7 = self.constr_max_space(x)
+        g8 = self.constr_max_energy(x)
+
+        out["F"] = np.column_stack([f1, f2, f3])
+        out["G"] = np.column_stack([g1, g2, g3_1, g3_2, g4, g5, g6, g7, g8])
 
 
 class MySampling(Sampling):
@@ -96,7 +144,7 @@ class MyNSGAII:
     def def_problems(self, problems):
         self.problems = problems
 
-    def def_algorithm(self, pop_size: int = 100, sampling=BinaryRandomSampling(),
+    def def_algorithm(self, pop_size: int = 500, sampling=BinaryRandomSampling(),
                       crossover=TwoPointCrossover(), mutation=BitflipMutation(),
                       eliminate=True):
         self.algorithm = NSGA2(
